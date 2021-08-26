@@ -5,6 +5,7 @@ import math
 from itertools import cycle
 import pandas as pd
 from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes
+from mpl_toolkits.axes_grid1.inset_locator import mark_inset
 
 def table(dic,save_csv = False):
     panda = pd.DataFrame(dic)
@@ -25,9 +26,9 @@ def load_results(file):
                 break
         res, avg, stdev = compile_results(res_path)
         results.append(res)
-        dic['Result'].append(avg)
-        dic['std'].append(stdev)
-    table(dic)
+        dic['Result'].append(np.round(avg,3))
+        dic['std'].append(np.round(stdev,3))
+    table(dic,True)
     return dic, results
 
 def compile_results(adress):
@@ -70,6 +71,8 @@ def graph(data, dic,interval=1):
     colorcycler = cycle(color)
     markercycler = cycle(marker)
     legends = legend_maker(dic)
+    fig, ax = plt.subplots()
+    final_accs = []
     for d,legend in zip(data,legends):
         x_axis = []
         l = next(linecycler)
@@ -77,14 +80,35 @@ def graph(data, dic,interval=1):
         c = next(colorcycler)
         for i in range(0,len(d)):
             x_axis.append(i*interval)
-        plt.plot(x_axis,d, marker= m ,linestyle = l ,markersize=2, label=legend)
+        ax.plot(x_axis,d, marker= m ,linestyle = l ,markersize=2, label=legend)
+        final_accs.append(d[-1])
     #plt.axis([0, 30,70 ,90])
     #plt.axis([145,155,88,92])
     #plt.axis([290, 300, 90, 95])
-    plt.xlabel('Epoch')
-    plt.ylabel('Top-1 Test Classification Accuracy')
-    plt.legend()
-    plt.grid(True)
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Accuracy')
+    ax.legend()
+    ax.grid(True)
+    axins1 = zoomed_inset_axes(ax, zoom=16, loc=10)
+
+    for d, legend in zip(data, legends):
+        x_axis = []
+        for i in range(0, len(d)):
+            x_axis.append(i * interval)
+        axins1.plot(x_axis, d)
+    axins1.grid(True)
+    ax.plot()
+
+    # SPECIFY THE LIMITS
+    x1, x2, y1, y2 = 295, 300, min(final_accs)-0.3, max(final_accs) +0.3
+    axins1.set_xlim(x1, x2)
+    axins1.set_ylim(y1, y2)
+    # IF SET TO TRUE, TICKS ALONG
+    # THE TWO AXIS WILL BE VISIBLE
+    plt.xticks(visible=False)
+    plt.yticks(visible=False)
+
+    mark_inset(ax, axins1, loc1=1, loc2=2, fc="none", ec="0.2")
     plt.tight_layout()
     plt.show()
 
@@ -117,17 +141,8 @@ def dirichlet_show(alpha,num_worker=10):
     plt.tight_layout()
     plt.show()
 
-loc = 'Results/'
-types = ['benchmark','timeCorrelated','topk']
-NNs = ['simplecifar']
 
-locations = []
-labels =[]
-for tpye in types:
-    for nn in NNs:
-        locations.append(loc + tpye +'/'+nn)
-        labels.append(tpye +'--'+ nn)
 
-dic,results = load_results('Results')
+dic,results = load_results('Results/topk')
 graph(results,dic)
-#dirichlet_show(0.5,100)
+#dirichlet_show(0.5,10)

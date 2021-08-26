@@ -9,6 +9,7 @@ from parameters import *
 import time
 import numpy as np
 from tqdm import tqdm
+import torch.linalg as lin
 
 
 def evaluate_accuracy(model, testloader, device):
@@ -42,13 +43,14 @@ def local_iteration(loader,model,optimizer,criterion,device,steps=1):
 
 def worker_operations(model,ps_model_flat,error,ps_model_mask,device,args):
     model_flat = sf.get_model_flattened(model, device)
-    model_flat.add_(error)
+    if not args.error_alt:
+        model_flat.add_(error)
 
     difmodel = (model_flat.sub(ps_model_flat)).to(device)
     difmodel_clone = torch.clone(difmodel.detach()).to(device)
 
 
-    sf.sparse_timeC(difmodel, args.sparsity_window, 10, ps_model_mask, device)
+    sf.sparse_timeC(difmodel, args.time_sparse, ps_model_mask, device)
 
     if args.quantization:
         difmodel = sf.quantize(difmodel, args, device)
@@ -73,7 +75,7 @@ def train(args, device):
     # synch all clients models models with PS
     [sf.pull_model(net_users[cl], net_ps) for cl in range(num_client)]
 
-    optimizers = [torch.optim.SGD(net_users[cl].parameters(), lr=args.lr, weight_decay = 1e-4) for cl in range(num_client)]
+    optimizers = [torch.optim.SGD(net_users[cl].parameters(), momentum=args.momentum,lr=args.lr, weight_decay = 1e-4) for cl in range(num_client)]
     criterions = [nn.CrossEntropyLoss() for u in range(num_client)]
     testloader = torch.utils.data.DataLoader(testset, batch_size=args.bs, shuffle=False, pin_memory=True)
     schedulers = [torch.optim.lr_scheduler.MultiStepLR(optimizers[cl], milestones=[150,225], gamma=0.1) for cl in range(num_client)]
@@ -87,6 +89,7 @@ def train(args, device):
     accuracys = []
     bias_mask = sf.get_BN_mask(net_ps, device)
     ps_model_mask = torch.ones(modelsize).to(device)
+    freq_vec = torch.zeros(modelsize,device=device)
     currentLR = sf.get_LR(optimizers[0])
     for cl in range(num_client):
         errors.append(torch.zeros(modelsize).to(device))
@@ -96,15 +99,20 @@ def train(args, device):
     trainloaders = [DataLoader(dl.DatasetSplit(trainset, sample_inds[cl]), batch_size=args.bs,
                              shuffle=True) for cl in range(num_client)]
     for epoch in tqdm(range(args.num_epoch)):
+        erorr_norm = []
         atWarmup = args.warmUp and epoch <5
         if atWarmup:
             sf.lr_warm_up(optimizers, epoch ,args.lr)
-            warm_runs = int(runs * args.LSGDturn)
-            for run in range(warm_runs):
+            for run in range(int(runs*args.LSGDturn)):
                 for cl in range(num_client):
+                    if args.error_alt:
+                        net_flat = sf.get_model_flattened(net_users[cl],device)
+                        net_flat.add_(errors[cl])
+                        sf.make_model_unflattened(net_users[cl], net_flat, net_sizes, ind_pairs)
                     local_iteration(trainloaders[cl], net_users[cl], optimizers[cl], criterions[cl], device)
                 sf.initialize_zero(net_ps)
                 [sf.push_model(net,net_ps,num_client) for net in net_users]
+                [sf.pull_model(net_users[cl], net_ps) for cl in range(num_client)]
 
         else:
             for run in range(runs):
@@ -118,13 +126,20 @@ def train(args, device):
                     difmodel, new_error = worker_operations(net_users[cl],ps_model_flat,errors[cl],ps_model_mask,device,args)
                     ps_model_dif.add_(difmodel/num_client)
                     errors[cl] = new_error
+                    er_norm = lin.norm(new_error.detach()).item()
+                    erorr_norm.append(er_norm)
 
                 ##server-side###
                 ps_model_flat.add_(ps_model_dif)
                 topk = math.ceil(ps_model_dif.nelement() / args.sparsity_window)
-                ind = torch.topk(ps_model_dif.abs(), k=topk, dim=0)[1]
                 ps_model_mask *= 0
-                ps_model_mask[ind] = 1
+                if args.freq_sparse:
+                    freq_vec.mul_(0.5)
+                    freq_vec.add_(ps_model_dif)
+                    vals, inds = torch.topk(freq_vec.abs(), k=topk, dim=0)
+                else:
+                    vals, inds = torch.topk(ps_model_dif.abs(), k=topk, dim=0)
+                ps_model_mask[inds] = 1
                 if args.biasFairness:
                     ps_model_mask.add_(bias_mask)
                     ps_model_mask = (ps_model_mask>0).int()
@@ -137,9 +152,10 @@ def train(args, device):
         lr_ = sf.get_LR(optimizers[0])
         if lr_ != currentLR and not atWarmup:
             [error.mul_(lr_ / currentLR) for error in errors]
+            freq_vec.mul_(lr_/currentLR)
         currentLR = lr_
         accuracys.append(acc * 100)
-        print('accuracy:',acc*100,)
+        print('accuracy:', acc * 100,'error norm: ',np.mean(erorr_norm))
     return accuracys
 
 def train_topk(args,device):
@@ -177,19 +193,21 @@ def train_topk(args,device):
     trainloaders = [DataLoader(dl.DatasetSplit(trainset, sample_inds[cl]), batch_size=args.bs,
                                shuffle=True) for cl in range(num_client)]
     for epoch in tqdm(range(args.num_epoch)):
+        erorr_norm = []
         atWarmup = args.warmUp and epoch < 5
         if atWarmup:
             sf.lr_warm_up(optimizers, epoch, args.lr)
-            for run in range(runs):
+            for run in range(int(runs*args.LSGDturn)):
                 for cl in range(num_client):
                     local_iteration(trainloaders[cl], net_users[cl], optimizers[cl], criterions[cl], device)
                 sf.initialize_zero(net_ps)
                 [sf.push_model(net, net_ps, num_client) for net in net_users]
+                [sf.pull_model(net_users[cl], net_ps) for cl in range(num_client)]
 
         else:
             for run in range(runs):
                 for cl in range(num_client):
-                    local_iteration(trainloaders[cl], net_users[cl], optimizers[cl], criterions[cl], device)
+                    local_iteration(trainloaders[cl], net_users[cl], optimizers[cl], criterions[cl], device,steps=args.LSGDturn)
 
                 ps_model_flat = sf.get_model_flattened(net_ps, device)
                 ps_model_dif = torch.zeros_like(ps_model_flat)
@@ -201,6 +219,8 @@ def train_topk(args,device):
                     worker_mask[difmodel.abs().topk(k=k,dim=0)[1]] = 1
                     ps_model_dif.add_(difmodel.mul(worker_mask),alpha=1/num_client)
                     errors[cl] = difmodel.mul(1-worker_mask)
+                    er_norm = lin.norm(errors[cl].detach()).item()
+                    erorr_norm.append(er_norm)
 
                 ##server-side###
                 ps_model_flat.add_(ps_model_dif)
@@ -215,5 +235,5 @@ def train_topk(args,device):
             [error.mul_(lr_ / currentLR) for error in errors]
         currentLR = lr_
         accuracys.append(acc * 100)
-        print('accuracy:', acc * 100)
+        print('accuracy:', acc * 100,'error norm: ',np.mean(erorr_norm))
     return accuracys

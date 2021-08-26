@@ -19,7 +19,7 @@ if __name__ == '__main__':
     if args.mode == 'tcs':
         newFile ='TCS-Quantize_{}-LSGD_{}-Dirich_{}-ID-{}'.format(args.quantization,args.LSGDturn,args.alfa,simulation_ID)
     elif args.mode == 'topk':
-        newFile = 'TopK-Quantize_{}-Dirich_{}-ID-{}'.format(args.quantization,args.alfa,
+        newFile = 'TopK-Quantize_{}-LSGD_{}-Dirich_{}-ID-{}'.format(args.quantization,args.LSGDturn,args.alfa,
                                                                    simulation_ID)
     else:
         raise NotImplementedError('incompatible mode')

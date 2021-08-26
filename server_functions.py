@@ -126,8 +126,18 @@ def get_LR(optimizer):
 
 
 
-def sparse_timeC(flat_params, sparsity_window, exclusive_sparsity_windows, prev_ps_mask, device):
-    exclusive_sparse= math.ceil(flat_params.numel() / (sparsity_window * exclusive_sparsity_windows))
+def sparse_timeC(flat_params, exclusive_sparsity_windows, prev_ps_mask, device):
+    exclusive_sparse= math.ceil(flat_params.numel() / (exclusive_sparsity_windows))
+    worker_exclusives = flat_params.mul(1-prev_ps_mask).to(device)
+    excl_tops, excl_ind = torch.topk(worker_exclusives.abs(), k=exclusive_sparse, dim=0)
+    exclusive_mask = torch.zeros_like(flat_params,device=device)
+    exclusive_mask[excl_ind] = 1
+    mask=prev_ps_mask.add(exclusive_mask)
+    flat_params *= mask
+    return None
+
+def sparse_timeC_shared(flat_params,exclusive_sparsity_windows, prev_ps_mask, device):
+    exclusive_sparse= math.ceil(flat_params.numel() / exclusive_sparsity_windows)
     worker_exclusives = flat_params.mul(1-prev_ps_mask).to(device)
     excl_tops, excl_ind = torch.topk(worker_exclusives.abs(), k=exclusive_sparse, dim=0)
     exclusive_mask = torch.zeros_like(flat_params,device=device)
