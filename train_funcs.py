@@ -44,17 +44,20 @@ def local_iteration(loader,model,optimizer,criterion,device,steps=1):
 def worker_operations(model,ps_model_flat,error,ps_model_mask,device,args):
     model_flat = sf.get_model_flattened(model, device)
     if not args.error_alt:
-        model_flat.add_(error)
+        model_flat.add_(error.mul(args.err_scale))
 
     difmodel = (model_flat.sub(ps_model_flat)).to(device)
     difmodel_clone = torch.clone(difmodel.detach()).to(device)
 
-
-    sf.sparse_timeC(difmodel, args.time_sparse, ps_model_mask, device)
+    if args.sparse_type =='pool':
+        sf.sparse_pool(difmodel,args.sparsity_window,args.time_sparse,ps_model_mask,device)
+    else:
+        sf.sparse_timeC(difmodel, args.time_sparse, ps_model_mask, device)
 
     if args.quantization:
         difmodel = sf.quantize(difmodel, args, device)
-    new_error = (difmodel_clone.sub(difmodel))
+    new_error = (difmodel_clone.sub(difmodel)).mul(args.low_pass)
+    new_error.add_(error, alpha=1-args.low_pass)
 
     return difmodel,new_error
 
@@ -105,10 +108,6 @@ def train(args, device):
             sf.lr_warm_up(optimizers, epoch ,args.lr)
             for run in range(int(runs*args.LSGDturn)):
                 for cl in range(num_client):
-                    if args.error_alt:
-                        net_flat = sf.get_model_flattened(net_users[cl],device)
-                        net_flat.add_(errors[cl])
-                        sf.make_model_unflattened(net_users[cl], net_flat, net_sizes, ind_pairs)
                     local_iteration(trainloaders[cl], net_users[cl], optimizers[cl], criterions[cl], device)
                 sf.initialize_zero(net_ps)
                 [sf.push_model(net,net_ps,num_client) for net in net_users]
@@ -117,6 +116,10 @@ def train(args, device):
         else:
             for run in range(runs):
                 for cl in range(num_client):
+                    if args.error_alt:
+                        net_flat = sf.get_model_flattened(net_users[cl],device)
+                        net_flat.add_(errors[cl].mul(args.err_scale))
+                        sf.make_model_unflattened(net_users[cl], net_flat, net_sizes, ind_pairs)
                     local_iteration(trainloaders[cl],net_users[cl],optimizers[cl],criterions[cl],device,steps=args.LSGDturn)
 
                 ps_model_flat = sf.get_model_flattened(net_ps, device)
@@ -132,11 +135,14 @@ def train(args, device):
                 ##server-side###
                 ps_model_flat.add_(ps_model_dif)
                 topk = math.ceil(ps_model_dif.nelement() / args.sparsity_window)
+                pool_K = math.ceil(ps_model_dif.nelement() / args.pool_sparsity)
                 ps_model_mask *= 0
-                if args.freq_sparse:
-                    freq_vec.mul_(0.5)
-                    freq_vec.add_(ps_model_dif)
-                    vals, inds = torch.topk(freq_vec.abs(), k=topk, dim=0)
+                freq_vec.mul_(args.freq_momentum)
+                freq_vec.add_(ps_model_dif.abs())
+                if args.sparse_type =='freq':
+                    vals, inds = torch.topk(freq_vec, k=topk, dim=0)
+                elif args.sparse_type =='pool':
+                    vals, inds = torch.topk(freq_vec, k=pool_K, dim=0)
                 else:
                     vals, inds = torch.topk(ps_model_dif.abs(), k=topk, dim=0)
                 ps_model_mask[inds] = 1
@@ -170,8 +176,8 @@ def train_topk(args,device):
     # synch all clients models models with PS
     [sf.pull_model(net_users[cl], net_ps) for cl in range(num_client)]
 
-    optimizers = [torch.optim.SGD(net_users[cl].parameters(), lr=args.lr, weight_decay=1e-4) for cl in
-                  range(num_client)]
+    optimizers = [torch.optim.SGD(net_users[cl].parameters(), momentum=args.momentum, lr=args.lr, weight_decay=1e-4) for
+                  cl in range(num_client)]
     criterions = [nn.CrossEntropyLoss() for u in range(num_client)]
     testloader = torch.utils.data.DataLoader(testset, batch_size=args.bs, shuffle=False, pin_memory=True)
     schedulers = [torch.optim.lr_scheduler.MultiStepLR(optimizers[cl], milestones=[150, 225], gamma=0.1) for cl in

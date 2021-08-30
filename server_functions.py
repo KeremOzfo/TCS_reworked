@@ -136,15 +136,17 @@ def sparse_timeC(flat_params, exclusive_sparsity_windows, prev_ps_mask, device):
     flat_params *= mask
     return None
 
-def sparse_timeC_shared(flat_params,exclusive_sparsity_windows, prev_ps_mask, device):
-    exclusive_sparse= math.ceil(flat_params.numel() / exclusive_sparsity_windows)
-    worker_exclusives = flat_params.mul(1-prev_ps_mask).to(device)
-    excl_tops, excl_ind = torch.topk(worker_exclusives.abs(), k=exclusive_sparse, dim=0)
-    exclusive_mask = torch.zeros_like(flat_params,device=device)
-    exclusive_mask[excl_ind] = 1
-    mask=prev_ps_mask.add(exclusive_mask)
-    flat_params *= mask
+def sparse_pool(flat_params, sparsity_window,exclusive_sparsity_windows, prev_ps_mask, device):
+    exclusive_sparse= math.ceil(flat_params.numel() / (exclusive_sparsity_windows))
+    primary_sparsity = math.ceil(flat_params.numel() / (sparsity_window))
+    mask = torch.zeros_like(flat_params,device=device)
+    ps_vals,ps_inds = flat_params.mul(prev_ps_mask).abs().topk(k=primary_sparsity,dim=0)
+    mask[ps_inds] = 1
+    w_vals, w_inds = flat_params.mul(1-mask).abs().topk(k=exclusive_sparse,dim=0)
+    mask[w_inds] = 1
+    flat_params.mul_(mask)
     return None
+
 
 def sparse_timeC_alt(grad_flat,exclusive_sparsity_windows,
     layer_spar,prev_ps_mask,ind_pairs,biasFairness,layersNames,device):
